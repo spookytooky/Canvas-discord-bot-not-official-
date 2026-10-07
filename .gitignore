@@ -12,3 +12,6 @@ wheels/
 
 # Logs
 *.log
+
+# Local SQLite database (contains your Canvas grades)
+*.db

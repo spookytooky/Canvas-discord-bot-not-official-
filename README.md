@@ -130,6 +130,41 @@ While it is running, the bot posts a daily digest at 12:00 PM Eastern to the cha
 
 Some schools are not UNF: if you go to another school, set `CANVAS_BASE_URL` in `.env` to your school's Canvas address (see the table below).
 
+## Local database (SQLite)
+
+The bot keeps a small SQLite database at `MainFile/canvas.db`. It is created automatically the first time the bot starts, it stays on the computer running the bot, and `.gitignore` keeps it out of git.
+
+| Table | What it holds |
+|---|---|
+| `courses` | The active courses the bot has seen |
+| `assignments` | Each assignment's due date, points, score, and whether it was submitted |
+| `grade_snapshots` | One grade reading per course, per day |
+
+Two things use it:
+
+- **`/grades`** shows how each course's score moved since the last recorded day, for example `▲ 1.50 since the last recorded day`. One snapshot is saved per course per day, so running the command again the same day updates that reading instead of adding another.
+- **`/urgent`** and the daily digest add a footer counting how much is due in each course, worked out by the database.
+
+You can delete `MainFile/canvas.db` at any time — the bot recreates it on the next start and simply shows no history until it has recorded two days. Because it holds your real grades, never share it or commit it, exactly like your `.env` file.
+
+### Looking at the data yourself
+
+```python
+import sqlite3
+
+conn = sqlite3.connect("MainFile/canvas.db")
+for course_id, score, day in conn.execute(
+    "SELECT course_id, score, snapshot_date FROM grade_snapshots ORDER BY snapshot_date"
+):
+    print(course_id, score, day)
+```
+
+The storage code lives in `MainFile/storage.py`, and you can run its tests with:
+
+```
+python -m unittest discover -s tests -v
+```
+
 ## Settings reference
 
 | Setting in `.env` | Required? | Default | What it does |
@@ -158,6 +193,7 @@ Send them the folder without your secrets or your installed environment. Exclude
 - `.env` (contains your tokens)
 - `.venv` (large, and your friend creates their own)
 - `MainFile/discord.log`
+- `MainFile/canvas.db` (contains your grades)
 - `__pycache__` folders
 
 Each person who runs the bot needs their own Discord bot token and their own Canvas token, and runs their own copy. One running copy only ever sees the Canvas account of the person whose token is in its `.env`.

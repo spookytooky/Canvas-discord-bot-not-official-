@@ -11,6 +11,7 @@ from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
 import main
+import storage
 
 load_dotenv()
 
@@ -65,8 +66,44 @@ def canvas_error_embed(error: main.CanvasError) -> discord.Embed:
     return discord.Embed(title="Couldn't reach Canvas", description=description, color=discord.Color.red())
 
 
-def build_urgent_embed(assignments: list[dict]) -> discord.Embed:
-    """The embed /urgent posts: assignments due within 72 hours, or the all-clear."""
+def _save_courses(courses) -> dict:
+    """Persist courses plus today's grade snapshot; return {course_id: (now, before)}.
+
+    Storage is best-effort: if SQLite is unavailable the caller just gets {} and
+    /grades still shows the live scores from Canvas.
+    """
+    if not courses:
+        return {}
+    try:
+        with storage.session() as conn:
+            storage.save_courses(conn, courses)
+            return storage.grade_changes(conn)
+    except Exception:
+        logger.exception("Could not save courses to the local database.")
+        return {}
+
+
+def _save_assignments(assignments):
+    """Persist assignments and return SQL-built counts, or None if storage failed."""
+    if not assignments:
+        return None
+    try:
+        with storage.session() as conn:
+            storage.save_assignments(conn, assignments)
+            total, courses = storage.deadline_summary(conn)
+            by_course = storage.course_deadline_report(conn)
+        return {"total": total, "courses": courses, "by_course": by_course}
+    except Exception:
+        logger.exception("Could not save assignments to the local database.")
+        return None
+
+
+def build_urgent_embed(assignments: list[dict], course_counts=None) -> discord.Embed:
+    """The embed /urgent posts: assignments due within 72 hours, or the all-clear.
+
+    ``course_counts`` is an optional [(course_name, count), ...] breakdown read
+    back from SQLite, left off whenever the database is unavailable.
+    """
     if not assignments:
         return discord.Embed(
             title="🎉 All Caught Up!",
@@ -98,6 +135,12 @@ def build_urgent_embed(assignments: list[dict]) -> discord.Embed:
             value=f"{title_link}\n⏳ Due in: {hours_left}h",
             inline=False,
         )
+
+    if course_counts:
+        breakdown = ", ".join(
+            f"{pretty_course_name(name)} ×{count}" for name, count in course_counts
+        )
+        embed.set_footer(text=f"Tracked in SQLite: {breakdown}")
 
     return embed
 
@@ -133,9 +176,18 @@ async def send_daily_message():
             await channel.send(embed=canvas_error_embed(error))
             return
 
-        await channel.send(embed=build_urgent_embed(assignments))
+        summary = await asyncio.to_thread(_save_assignments, assignments)
+        course_counts = summary["by_course"] if summary else None
+
+        await channel.send(embed=build_urgent_embed(assignments, course_counts))
         if assignments:
             logger.info("Daily message sent to channel %s (%d assignment(s) due).", ALERT_CHANNEL_ID, len(assignments))
+            if summary:
+                logger.info(
+                    "Local database reports %d assignment(s) across %d course(s) due in the next 72 hours.",
+                    summary["total"],
+                    summary["courses"],
+                )
         else:
             logger.info("Daily message sent to channel %s (nothing due in the next 72 hours).", ALERT_CHANNEL_ID)
     except discord.HTTPException as error:
@@ -148,6 +200,16 @@ async def send_daily_message():
 async def on_ready():
     await bot.tree.sync(guild=guild_id)
     print(f"Logged in as {bot.user.name} and synced tree to guild {SERVER_ID}")
+
+    try:
+        with storage.session() as conn:
+            pending, course_count = storage.deadline_summary(conn)
+        print(
+            f"Local database ready ({storage.DB_PATH.name}): "
+            f"{pending} assignment(s) across {course_count} course(s) still due."
+        )
+    except Exception:
+        logger.exception("Local database unavailable; the bot will keep working without it.")
 
     if ALERT_CHANNEL_ID is None:
         print("Daily message is off (ALERT_CHANNEL_ID is blank in .env).")
@@ -180,10 +242,20 @@ async def grades(interaction: discord.Interaction):
     if not courses:
         embed.description = "No active courses found for the current term."
     else:
+        changes = await asyncio.to_thread(_save_courses, courses)
         for info in courses:
             name = pretty_course_name(info.get("name", "Unknown Course"))
             grade = info.get("current_grade", "N/A")
-            embed.add_field(name=name, value=f"Current Grade: {grade}", inline=False)
+            value = f"Current Grade: {grade}"
+
+            change = changes.get(info.get("id"))
+            if change:
+                current, previous = change
+                if current is not None and previous is not None and abs(current - previous) >= 0.05:
+                    arrow = "▲" if current > previous else "▼"
+                    value += f"\n{arrow} {abs(current - previous):.2f} since the last recorded day"
+
+            embed.add_field(name=name, value=value, inline=False)
 
     await interaction.followup.send(embed=embed)
 
@@ -198,7 +270,10 @@ async def urgent(interaction: discord.Interaction):
         await interaction.followup.send(embed=canvas_error_embed(error))
         return
 
-    await interaction.followup.send(embed=build_urgent_embed(urgent_assignments))
+    summary = await asyncio.to_thread(_save_assignments, urgent_assignments)
+    course_counts = summary["by_course"] if summary else None
+
+    await interaction.followup.send(embed=build_urgent_embed(urgent_assignments, course_counts))
 
 
 # /links sends links for all classes

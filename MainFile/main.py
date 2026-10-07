@@ -125,6 +125,8 @@ class CanvasClient:
                 "id": data.get("id"),
                 "name": name,
                 "course_code": data.get("course_code"),
+                # current_score stays numeric for storage; current_grade is display-ready.
+                "current_score": current_grade,
                 "current_grade": f"{current_grade}%" if current_grade is not None else "N/A",
             })
         return active_courses
@@ -137,6 +139,7 @@ class CanvasClient:
         for data in response:
             sub = data.get("submission") or {}
             all_data.append({
+                "id": data.get("id"),
                 "name": data.get("name"),
                 "due_at": data.get("due_at"),
                 "url": data.get("html_url"),
@@ -157,6 +160,9 @@ class CanvasClient:
             class_id = course["id"]
 
             assignments = self.get_course_assignments(class_id)
+            # Carry the course id along so callers can store assignments per course.
+            for assignment in assignments:
+                assignment["course_id"] = class_id
             all_info[class_name] = assignments
 
         return all_info
